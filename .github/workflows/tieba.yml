@@ -3,24 +3,59 @@ name: Daily Tieba Sign-In
 on:
   workflow_dispatch:
   schedule:
-    - cron: '17 23 * * *'  # 北京时间 6:30 (UTC+8)
+    # 一天三个槽位：北京 10:13 / 14:13 / 18:13
+    # 全部避开 UTC 23:00-01:00（全平台最拥堵窗口）与整点分钟，
+    # 前面成功过就跳过，所以多跑几次不会重复签到。
+    - cron: '13 2,6,10 * * *'
+
+permissions:
+  contents: read
+  actions: read          # 让下面的 gh run list 能读运行记录
+
+# 三个槽位串行，避免前一个还没跑完后一个就启动、导致互相看不到对方的成功记录
+concurrency:
+  group: tieba-daily
+  cancel-in-progress: false
 
 jobs:
   signin:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 30
     steps:
+      - name: 判断今天是否已经成功过
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TODAY=$(date -u +%Y-%m-%d)
+          DONE=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow "$GITHUB_WORKFLOW" \
+            --status success \
+            --limit 20 \
+            --json createdAt,databaseId \
+            --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID) | select(.createdAt | startswith(\"$TODAY\"))] | length")
+          echo "今日已成功运行次数：$DONE"
+          if [ "$DONE" -gt 0 ]; then
+            echo "need=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "need=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout code
+        if: steps.guard.outputs.need == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Java
+        if: steps.guard.outputs.need == 'true'
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '8'
-          cache: 'maven'  # 使用官方推荐的 Maven 依赖缓存
+          cache: 'maven'
 
       - name: Build and execute
+        if: steps.guard.outputs.need == 'true'
         env:
           BDUSS: ${{ secrets.BDUSS }}
           SCKEY: ${{ secrets.SCKEY }}
