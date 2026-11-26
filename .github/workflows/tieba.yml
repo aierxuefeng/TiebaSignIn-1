@@ -3,10 +3,14 @@ name: Daily Tieba Sign-In
 on:
   workflow_dispatch:
   schedule:
-    # 一天三个槽位：北京 10:13 / 14:13 / 18:13
-    # 全部避开 UTC 23:00-01:00（全平台最拥堵窗口）与整点分钟，
-    # 前面成功过就跳过，所以多跑几次不会重复签到。
-    - cron: '13 2,6,10 * * *'
+    # 一天三个槽位，全部落在北京 06:00 之后（cron 是 UTC，UTC+8 = 北京）：
+    #   UTC 22:07 = 北京 06:07
+    #   UTC 04:07 = 北京 12:07
+    #   UTC 10:07 = 北京 18:07
+    # 间隔 6 小时均匀摊开，避免全挤在同一段拥堵窗口里。
+    # 延迟只会让执行更晚、不会更早，不会出现在凌晨跑的情况。
+    # 前面成功过就跳过，多跑几次不会重复签到。
+    - cron: '7 22,4,10 * * *'
 
 permissions:
   contents: read
@@ -22,20 +26,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: 判断今天是否已经成功过
+      - name: 判断今天（北京时间）是否已经成功过
         id: guard
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TODAY=$(date -u +%Y-%m-%d)
-          DONE=$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow "$GITHUB_WORKFLOW" \
-            --status success \
-            --limit 20 \
-            --json createdAt,databaseId \
-            --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID) | select(.createdAt | startswith(\"$TODAY\"))] | length")
-          echo "今日已成功运行次数：$DONE"
+          # 按北京时间归日：直接用 UTC+8 换算，不依赖 runner 的时区数据库。
+          # 之前用 date -u 取 UTC 日期，导致凌晨到达的槽位把前一天算成今天，被误跳过。
+          TODAY=$(date -u -d '+8 hours' +%F)
+          DONE=0
+          for ts in $(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow "$GITHUB_WORKFLOW" \
+              --status success \
+              --limit 40 \
+              --json databaseId,updatedAt \
+              --jq ".[] | select(.databaseId != $GITHUB_RUN_ID) | .updatedAt"); do
+            if [ "$(date -u -d "$ts + 8 hours" +%F)" = "$TODAY" ]; then
+              DONE=$((DONE + 1))
+            fi
+          done
+          echo "北京时间 $TODAY 已成功运行次数：$DONE"
           if [ "$DONE" -gt 0 ]; then
             echo "need=false" >> "$GITHUB_OUTPUT"
           else
